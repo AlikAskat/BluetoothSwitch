@@ -1,7 +1,10 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Windows.Devices.Radios;
@@ -11,8 +14,55 @@ internal static class Program
     [STAThread]
     static void Main()
     {
+        Logger.Write("=== BluetoothSwitch started ===");
+
+        Application.ThreadException += (s, e) =>
+        {
+            Logger.Write("UI THREAD EXCEPTION: " + e.Exception);
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+        {
+            Logger.Write("UNHANDLED EXCEPTION: " + e.ExceptionObject);
+        };
+
+        TaskScheduler.UnobservedTaskException += (s, e) =>
+        {
+            Logger.Write("UNOBSERVED TASK EXCEPTION: " + e.Exception);
+            e.SetObserved();
+        };
+
         ApplicationConfiguration.Initialize();
         Application.Run(new BluetoothTrayContext());
+
+        Logger.Write("=== BluetoothSwitch stopped ===");
+    }
+}
+
+internal static class Logger
+{
+    private static readonly string LogDirectory =
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BluetoothSwitch");
+
+    private static readonly string LogFile =
+        Path.Combine(LogDirectory, "BluetoothSwitch.log");
+
+    public static void Write(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(LogDirectory);
+
+            File.AppendAllText(
+                LogFile,
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} | {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Logging must never crash the application.
+        }
     }
 }
 
@@ -24,15 +74,25 @@ internal class BluetoothTrayContext : ApplicationContext
 
     public BluetoothTrayContext()
     {
+        Logger.Write("Creating tray context.");
+
         menu = new ContextMenuStrip();
 
-        var toggleItem = new ToolStripMenuItem("Включить / выключить Bluetooth");
+        var toggleItem = new ToolStripMenuItem(
+            "Включить / выключить Bluetooth");
+
         toggleItem.Click += async (s, e) => await ToggleBluetooth();
+
+        var settingsItem = new ToolStripMenuItem(
+            "Параметры Bluetooth");
+
+        settingsItem.Click += (s, e) => OpenBluetoothSettings();
 
         var exitItem = new ToolStripMenuItem("Выход");
         exitItem.Click += (s, e) => ExitApplication();
 
         menu.Items.Add(toggleItem);
+        menu.Items.Add(settingsItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
@@ -50,25 +110,35 @@ internal class BluetoothTrayContext : ApplicationContext
                 await ToggleBluetooth();
         };
 
+        Logger.Write("Tray icon created.");
+
         _ = UpdateTrayStatus();
     }
 
     private async Task ToggleBluetooth()
     {
         if (busy)
+        {
+            Logger.Write("Toggle ignored: operation already in progress.");
             return;
+        }
 
         busy = true;
+        Logger.Write("Toggle started.");
 
         try
         {
             var radios = await Radio.GetRadiosAsync();
+
+            Logger.Write($"Radios found: {radios.Count}");
 
             var bluetooth = radios.FirstOrDefault(
                 r => r.Kind == RadioKind.Bluetooth);
 
             if (bluetooth == null)
             {
+                Logger.Write("Bluetooth radio not found.");
+
                 trayIcon.Icon = CreateBluetoothIcon(Color.Gray);
                 trayIcon.Text = "Bluetooth: не найден";
 
@@ -81,11 +151,17 @@ internal class BluetoothTrayContext : ApplicationContext
                 return;
             }
 
+            Logger.Write($"Bluetooth current state: {bluetooth.State}");
+
             var newState = bluetooth.State == RadioState.On
                 ? RadioState.Off
                 : RadioState.On;
 
+            Logger.Write($"Requesting Bluetooth state: {newState}");
+
             var result = await bluetooth.SetStateAsync(newState);
+
+            Logger.Write($"SetStateAsync result: {result}");
 
             if (result != RadioAccessStatus.Allowed)
             {
@@ -98,9 +174,13 @@ internal class BluetoothTrayContext : ApplicationContext
             }
 
             await UpdateTrayStatus();
+
+            Logger.Write("Toggle finished.");
         }
         catch (Exception ex)
         {
+            Logger.Write("Toggle exception: " + ex);
+
             trayIcon.Icon = CreateBluetoothIcon(Color.Gray);
             trayIcon.Text = "Bluetooth: ошибка";
 
@@ -116,10 +196,39 @@ internal class BluetoothTrayContext : ApplicationContext
         }
     }
 
+    private void OpenBluetoothSettings()
+    {
+        Logger.Write("Opening Bluetooth settings.");
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "ms-settings:bluetooth",
+                UseShellExecute = true
+            });
+
+            Logger.Write("Bluetooth settings opened.");
+        }
+        catch (Exception ex)
+        {
+            Logger.Write("Opening Bluetooth settings failed: " + ex);
+
+            MessageBox.Show(
+                "Не удалось открыть параметры Bluetooth:\n\n" +
+                ex.Message,
+                "Bluetooth Switch",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
     private async Task UpdateTrayStatus()
     {
         try
         {
+            Logger.Write("Updating tray status.");
+
             var radios = await Radio.GetRadiosAsync();
 
             var bluetooth = radios.FirstOrDefault(
@@ -127,10 +236,15 @@ internal class BluetoothTrayContext : ApplicationContext
 
             if (bluetooth == null)
             {
+                Logger.Write("UpdateTrayStatus: Bluetooth not found.");
+
                 trayIcon.Icon = CreateBluetoothIcon(Color.Gray);
                 trayIcon.Text = "Bluetooth: не найден";
                 return;
             }
+
+            Logger.Write(
+                $"UpdateTrayStatus: Bluetooth state = {bluetooth.State}");
 
             if (bluetooth.State == RadioState.On)
             {
@@ -150,8 +264,10 @@ internal class BluetoothTrayContext : ApplicationContext
                 trayIcon.Text = "Bluetooth: неизвестно";
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Logger.Write("UpdateTrayStatus exception: " + ex);
+
             trayIcon.Icon = CreateBluetoothIcon(Color.Gray);
             trayIcon.Text = "Bluetooth: ошибка";
         }
@@ -161,14 +277,13 @@ internal class BluetoothTrayContext : ApplicationContext
     {
         const int size = 64;
 
-        var bitmap = new Bitmap(size, size);
+        using var bitmap = new Bitmap(size, size);
 
         using (var graphics = Graphics.FromImage(bitmap))
         {
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.Clear(Color.Transparent);
 
-            // Цветной круг состояния
             using (var brush = new SolidBrush(backgroundColor))
             {
                 graphics.FillEllipse(
@@ -179,59 +294,46 @@ internal class BluetoothTrayContext : ApplicationContext
                     60);
             }
 
-            // Белый символ Bluetooth
             using (var pen = new Pen(Color.White, 6))
             {
                 pen.StartCap = LineCap.Round;
                 pen.EndCap = LineCap.Round;
                 pen.LineJoin = LineJoin.Round;
 
-                graphics.DrawLine(
-                    pen,
-                    32, 10,
-                    32, 54);
-
-                graphics.DrawLine(
-                    pen,
-                    32, 10,
-                    48, 22);
-
-                graphics.DrawLine(
-                    pen,
-                    48, 22,
-                    32, 32);
-
-                graphics.DrawLine(
-                    pen,
-                    32, 22,
-                    48, 42);
-
-                graphics.DrawLine(
-                    pen,
-                    48, 42,
-                    32, 54);
-
-                graphics.DrawLine(
-                    pen,
-                    32, 32,
-                    15, 16);
-
-                graphics.DrawLine(
-                    pen,
-                    32, 32,
-                    15, 48);
+                graphics.DrawLine(pen, 32, 10, 32, 54);
+                graphics.DrawLine(pen, 32, 10, 48, 22);
+                graphics.DrawLine(pen, 48, 22, 32, 32);
+                graphics.DrawLine(pen, 32, 22, 48, 42);
+                graphics.DrawLine(pen, 48, 42, 32, 54);
+                graphics.DrawLine(pen, 32, 32, 15, 16);
+                graphics.DrawLine(pen, 32, 32, 15, 48);
             }
         }
 
         IntPtr handle = bitmap.GetHicon();
-        return Icon.FromHandle(handle);
+
+        try
+        {
+            using var temporaryIcon = Icon.FromHandle(handle);
+            return (Icon)temporaryIcon.Clone();
+        }
+        finally
+        {
+            DestroyIcon(handle);
+        }
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
 
     private void ExitApplication()
     {
+        Logger.Write("Exit requested.");
+
         trayIcon.Visible = false;
         trayIcon.Dispose();
         menu.Dispose();
+
         Application.Exit();
     }
 
@@ -239,6 +341,8 @@ internal class BluetoothTrayContext : ApplicationContext
     {
         if (disposing)
         {
+            Logger.Write("Disposing tray context.");
+
             trayIcon.Dispose();
             menu.Dispose();
         }
